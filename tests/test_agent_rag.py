@@ -21,7 +21,8 @@ def test_produits_par_fournisseur_utilise_un_parametre_sql(monkeypatch):
     assert len(appels) == 1
     sql, parametres = appels[0]
     assert "WHERE fournisseur = %s" in sql
-    assert parametres == ("NovaTech",)
+    assert "LIMIT %s" in sql
+    assert parametres == ("NovaTech", agent.LIMITE_RESULTATS_SQL)
     assert "NovaTech" not in sql
 
 
@@ -36,8 +37,9 @@ def test_produits_par_prix_transmet_le_prix_et_refuse_un_prix_negatif(monkeypatc
     plugin = agent.SQLPlugin()
 
     assert plugin.produits_par_prix(125.5) == "résultats"
-    assert appels[0][1] == (125.5,)
+    assert appels[0][1] == (125.5, agent.LIMITE_RESULTATS_SQL)
     assert "prix <= %s" in appels[0][0]
+    assert "LIMIT %s" in appels[0][0]
 
     assert plugin.produits_par_prix(-1) == "Le prix maximum doit être supérieur ou égal à 0."
     assert len(appels) == 1
@@ -54,7 +56,8 @@ def test_stock_par_produit_encode_le_terme_dans_un_parametre(monkeypatch):
 
     assert agent.SQLPlugin().stock_par_produit("  souris  ") == "résultats"
     assert "libelle LIKE %s" in appels[0][0]
-    assert appels[0][1] == ("%souris%",)
+    assert "LIMIT %s" in appels[0][0]
+    assert appels[0][1] == ("%souris%", agent.LIMITE_RESULTATS_SQL)
 
 
 def test_stock_par_produit_vide_ne_consulte_pas_la_base(monkeypatch):
@@ -80,7 +83,8 @@ def test_statistiques_execute_une_requete_agregee_en_lecture_seule(monkeypatch):
     assert sql.lstrip().startswith("SELECT")
     assert "COUNT(*)" in sql
     assert "AVG(prix)" in sql
-    assert parametres == ()
+    assert "LIMIT %s" in sql
+    assert parametres == (agent.LIMITE_RESULTATS_SQL,)
 
 
 @pytest.mark.parametrize(

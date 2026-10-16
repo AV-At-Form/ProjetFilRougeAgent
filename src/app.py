@@ -11,12 +11,17 @@ import markdown
 import uvicorn
 from fastapi import FastAPI, HTTPException
 from fastapi.responses import HTMLResponse
+from openai import BadRequestError, RateLimitError
 from pydantic import BaseModel, Field
 from semantic_kernel.agents.chat_completion.chat_completion_agent import ChatHistoryAgentThread
+from semantic_kernel.contents.chat_history import ChatHistory
+from semantic_kernel.contents.chat_message_content import ChatMessageContent
 from semantic_kernel.contents.function_call_content import FunctionCallContent
 from semantic_kernel.contents.function_result_content import FunctionResultContent
+from semantic_kernel.contents.utils.author_role import AuthorRole
 
 from agent import SYSTEM_PROMPT, creer_agent
+from securite import LimiteurDeDebit, filtrer_sortie, verifier_entree
 
 
 class Message(TypedDict):
@@ -38,6 +43,8 @@ class MessageRequest(BaseModel):
     content: str = Field(min_length=1, max_length=10_000)
 
 
+HISTORIQUE_MAX_TOURS = 10
+limiteur = LimiteurDeDebit(maximum=3, secondes=60)
 FICHIER_INTERFACE = Path(__file__).resolve().parent / "static" / "index.html"
 BALISES_MARKDOWN_AUTORISEES = set(bleach.sanitizer.ALLOWED_TAGS).union(
     {
@@ -71,6 +78,25 @@ async def lifespan(application: FastAPI):
 
 
 app = FastAPI(title="Assistant Achats", lifespan=lifespan)
+
+
+def tronquer_historique(historique: list[Message], max_tours: int = HISTORIQUE_MAX_TOURS) -> list[Message]:
+    """Garde les messages système et les derniers échanges utilisateur/assistant."""
+    if max_tours < 1:
+        raise ValueError("max_tours doit être supérieur ou égal à 1.")
+
+    messages_systeme = [message for message in historique if message["role"] == "system"]
+    messages_conversation = [message for message in historique if message["role"] != "system"]
+    indices_utilisateur = [
+        index
+        for index, message in enumerate(messages_conversation)
+        if message["role"] == "user"
+    ]
+    if len(indices_utilisateur) <= max_tours:
+        return messages_systeme + messages_conversation
+
+    debut = indices_utilisateur[-max_tours]
+    return messages_systeme + messages_conversation[debut:]
 
 
 async def outils_utilises(
@@ -133,21 +159,55 @@ async def envoyer_message(conversation_id: str, demande: MessageRequest) -> dict
         raise HTTPException(status_code=404, detail="Conversation introuvable.")
 
     contenu = demande.content.strip()
-    if not contenu:
-        raise HTTPException(status_code=422, detail="Le message ne peut pas être vide.")
+    entree_valide, raison = verifier_entree(contenu)
+    if not entree_valide:
+        raise HTTPException(status_code=400, detail=raison)
+    if not limiteur.autoriser():
+        raise HTTPException(
+            status_code=429,
+            detail="Trop de requêtes. Veuillez réessayer dans une minute.",
+        )
 
     async with conversation["lock"]:
-        debut_historique = len(conversation["thread"]) if conversation["thread"] else 0
-        reponse = await app.state.agent.get_response(
-            messages=contenu,
-            thread=conversation["thread"],
-        )
+        historique = tronquer_historique(conversation["history"])
+        chat_history = ChatHistory()
+        for message in historique:
+            if message["role"] == "user":
+                chat_history.add_message(
+                    ChatMessageContent(role=AuthorRole.USER, content=message["content"])
+                )
+            elif message["role"] == "assistant":
+                chat_history.add_message(
+                    ChatMessageContent(role=AuthorRole.ASSISTANT, content=message["content"])
+                )
+
+        thread = ChatHistoryAgentThread(chat_history=chat_history)
+        debut_historique = len(thread)
+        try:
+            reponse = await app.state.agent.get_response(
+                messages=contenu,
+                thread=thread,
+            )
+        except BadRequestError as erreur:
+            if "content_filter" in str(erreur).casefold():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Le contenu du message a été refusé par le filtre de sécurité.",
+                ) from erreur
+            raise
+        except RateLimitError as erreur:
+            raise HTTPException(
+                status_code=429,
+                detail="Le service IA est temporairement limité. Veuillez réessayer plus tard.",
+            ) from erreur
         conversation["thread"] = reponse.thread
-        contenu_reponse = reponse.content.content or ""
+        contenu_reponse = filtrer_sortie(reponse.content.content or "")
         outils = await outils_utilises(reponse.thread, debut_historique)
         message_utilisateur: Message = {"role": "user", "content": contenu}
         message_assistant: Message = {"role": "assistant", "content": contenu_reponse}
-        conversation["history"].extend([message_utilisateur, message_assistant])
+        conversation["history"] = tronquer_historique(
+            historique + [message_utilisateur, message_assistant]
+        )
 
     return {
         "user": message_utilisateur,
