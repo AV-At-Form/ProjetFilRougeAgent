@@ -1,0 +1,200 @@
+<!doctype html>
+<html lang="fr">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Assistant Achats</title>
+  <style>
+    :root {
+      color-scheme: light;
+      font-family: Inter, "Segoe UI", sans-serif;
+      color: #172033;
+      background: #f3f5f9;
+    }
+    * { box-sizing: border-box; }
+    body { margin: 0; min-height: 100vh; display: flex; justify-content: center; }
+    .app { width: min(900px, 100%); min-height: 100vh; display: flex; flex-direction: column; background: #fff; }
+    header { display: flex; justify-content: space-between; align-items: center; gap: 16px; padding: 18px 24px; border-bottom: 1px solid #e6e9ef; }
+    h1 { margin: 0; font-size: 1.15rem; }
+    .subtitle { margin: 4px 0 0; color: #697386; font-size: .88rem; }
+    button { border: 0; border-radius: 9px; padding: 10px 14px; font: inherit; font-weight: 600; cursor: pointer; }
+    button:disabled { opacity: .55; cursor: wait; }
+    .new-chat { color: #34415a; background: #edf0f6; white-space: nowrap; }
+    .messages { flex: 1; overflow-y: auto; padding: 28px 24px; }
+    .empty { color: #687386; text-align: center; margin: 18vh auto 0; max-width: 460px; line-height: 1.6; }
+    .message { max-width: 82%; margin: 0 0 20px; }
+    .message.user { margin-left: auto; }
+    .role { display: block; margin: 0 0 6px; color: #7b8495; font-size: .78rem; }
+    .bubble { padding: 12px 15px; border-radius: 13px; line-height: 1.55; overflow-wrap: anywhere; }
+    .user .bubble { background: #eaf0ff; border-bottom-right-radius: 4px; white-space: pre-wrap; }
+    .assistant .bubble { background: #f4f5f8; border-bottom-left-radius: 4px; }
+    .assistant .bubble > :first-child { margin-top: 0; }
+    .assistant .bubble > :last-child { margin-bottom: 0; }
+    .assistant pre { overflow-x: auto; padding: 12px; border-radius: 8px; background: #e8eaf0; }
+    .assistant code { font-family: Consolas, monospace; }
+    .assistant table { border-collapse: collapse; }
+    .assistant th, .assistant td { padding: 6px 9px; border: 1px solid #d7dbe4; }
+    .tools-used { margin-top: 10px; color: #586276; font-size: .84rem; }
+    .tools-used summary { width: fit-content; cursor: pointer; user-select: none; }
+    .tools-used ul { margin: 8px 0 0; padding-left: 22px; }
+    .tools-used li { margin: 4px 0; }
+    .error { color: #a52626; }
+    .composer { padding: 14px 24px 20px; border-top: 1px solid #e6e9ef; }
+    form { display: flex; align-items: flex-end; gap: 10px; }
+    textarea { flex: 1; resize: vertical; min-height: 48px; max-height: 180px; padding: 12px; border: 1px solid #d8dce5; border-radius: 10px; font: inherit; line-height: 1.4; }
+    textarea:focus { outline: 2px solid #cbd8ff; border-color: #7189d5; }
+    .send { color: #fff; background: #3157c8; min-height: 48px; }
+    .status { min-height: 18px; margin: 7px 2px 0; color: #697386; font-size: .8rem; }
+    @media (max-width: 600px) {
+      header { padding: 14px 16px; }
+      .messages { padding: 20px 16px; }
+      .composer { padding: 12px 16px 16px; }
+      .message { max-width: 94%; }
+    }
+  </style>
+</head>
+<body>
+  <main class="app">
+    <header>
+      <div>
+        <h1>Assistant Achats</h1>
+        <p class="subtitle">Questions sur les produits et les fournisseurs</p>
+      </div>
+      <button id="new-chat" class="new-chat" type="button">Nouvelle conversation</button>
+    </header>
+    <section id="messages" class="messages" aria-live="polite" aria-label="Fil de discussion">
+      <p class="empty">Bonjour ! Posez une question sur les produits, les stocks ou les fiches fournisseurs.</p>
+    </section>
+    <footer class="composer">
+      <form id="chat-form">
+        <textarea id="question" rows="1" maxlength="10000" placeholder="Écrivez votre message…" aria-label="Votre message" required></textarea>
+        <button id="send" class="send" type="submit">Envoyer</button>
+      </form>
+      <p id="status" class="status" role="status"></p>
+    </footer>
+  </main>
+  <script>
+    const messages = document.getElementById("messages");
+    const form = document.getElementById("chat-form");
+    const input = document.getElementById("question");
+    const sendButton = document.getElementById("send");
+    const newChatButton = document.getElementById("new-chat");
+    const status = document.getElementById("status");
+    let conversationId = null;
+
+    async function api(url, options = {}) {
+      const response = await fetch(url, {
+        headers: { "Content-Type": "application/json" },
+        ...options
+      });
+      if (!response.ok) {
+        const detail = await response.json().catch(() => ({}));
+        throw new Error(detail.detail || `Erreur ${response.status}`);
+      }
+      return response.json();
+    }
+
+    function clearEmptyState() {
+      const empty = messages.querySelector(".empty");
+      if (empty) empty.remove();
+    }
+
+    function addMessage(role, content, html = null, tools = []) {
+      clearEmptyState();
+      const article = document.createElement("article");
+      article.className = `message ${role}`;
+      const label = document.createElement("span");
+      label.className = "role";
+      label.textContent = role === "user" ? "Vous" : "Assistant";
+      const bubble = document.createElement("div");
+      bubble.className = "bubble";
+      if (html !== null) bubble.innerHTML = html;
+      else bubble.textContent = content;
+      article.append(label, bubble);
+      if (role === "assistant") {
+        const details = document.createElement("details");
+        details.className = "tools-used";
+        const summary = document.createElement("summary");
+        summary.textContent = `Outils utilisés (${tools.length})`;
+        details.append(summary);
+        if (tools.length) {
+          const list = document.createElement("ul");
+          for (const tool of tools) {
+            const item = document.createElement("li");
+            item.textContent = tool.name;
+            list.append(item);
+          }
+          details.append(list);
+        } else {
+          const note = document.createElement("p");
+          note.textContent = "Aucun outil utilisé pour cette réponse.";
+          details.append(note);
+        }
+        article.append(details);
+      }
+      messages.append(article);
+      messages.scrollTop = messages.scrollHeight;
+      return article;
+    }
+
+    async function startConversation() {
+      newChatButton.disabled = true;
+      sendButton.disabled = true;
+      status.textContent = "Préparation de la conversation…";
+      try {
+        const conversation = await api("/api/conversations", { method: "POST" });
+        conversationId = conversation.id;
+        sessionStorage.setItem("conversationId", conversationId);
+        messages.replaceChildren();
+        const greeting = document.createElement("p");
+        greeting.className = "empty";
+        greeting.textContent = "Bonjour ! Posez une question sur les produits, les stocks ou les fiches fournisseurs.";
+        messages.append(greeting);
+        status.textContent = "";
+      } catch (error) {
+        status.textContent = `Impossible de démarrer : ${error.message}`;
+      } finally {
+        newChatButton.disabled = false;
+        sendButton.disabled = !conversationId;
+      }
+    }
+
+    form.addEventListener("submit", async (event) => {
+      event.preventDefault();
+      const content = input.value.trim();
+      if (!content || !conversationId) return;
+
+      addMessage("user", content);
+      input.value = "";
+      sendButton.disabled = true;
+      newChatButton.disabled = true;
+      status.textContent = "L’assistant rédige sa réponse…";
+      try {
+        const result = await api(`/api/conversations/${conversationId}/messages`, {
+          method: "POST",
+          body: JSON.stringify({ content })
+        });
+        addMessage("assistant", result.assistant.content, result.assistant_html, result.tools_used);
+        status.textContent = "";
+      } catch (error) {
+        const failed = addMessage("assistant error", `La réponse n’a pas pu être obtenue : ${error.message}`);
+        failed.querySelector(".role").textContent = "Erreur";
+        status.textContent = "";
+      } finally {
+        sendButton.disabled = !conversationId;
+        newChatButton.disabled = false;
+        input.focus();
+      }
+    });
+
+    newChatButton.addEventListener("click", startConversation);
+    input.addEventListener("keydown", (event) => {
+      if (event.key === "Enter" && !event.shiftKey) {
+        event.preventDefault();
+        form.requestSubmit();
+      }
+    });
+    startConversation();
+  </script>
+</body>
+</html>

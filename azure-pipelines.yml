@@ -1,0 +1,86 @@
+trigger:
+  branches:
+    include:
+      - '*'
+      - '**/*'
+
+pool:
+  vmImage: ubuntu-latest
+
+variables:
+  pythonVersion: '3.12'
+
+stages:
+  - stage: Dev
+    displayName: Dev
+    jobs:
+      - job: SyntaxCheck
+        displayName: Vérification de la syntaxe Python
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: Utiliser Python $(pythonVersion)
+
+          - script: |
+              python -m compileall -q src/agent.py src/app.py src/rag.py
+            displayName: Compiler les modules de l'application
+
+  - stage: Test
+    displayName: Test
+    dependsOn: Dev
+    jobs:
+      - job: UnitTests
+        displayName: Tests unitaires
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: Utiliser Python $(pythonVersion)
+
+          - task: Cache@2
+            inputs:
+              key: 'pip | "$(Agent.OS)" | requirements.txt'
+              restoreKeys: |
+                pip | "$(Agent.OS)"
+              path: $(Pipeline.Workspace)/.pip
+            displayName: Restaurer le cache pip
+
+          - script: |
+              python -m pip install --upgrade pip
+              python -m pip install -r requirements.txt
+            displayName: Installer les dépendances du projet
+            env:
+              PIP_CACHE_DIR: $(Pipeline.Workspace)/.pip
+
+          - script: |
+              python -m pytest tests -q --junitxml="$(Common.TestResultsDirectory)/pytest-results.xml"
+            displayName: Exécuter pytest
+
+          - task: PublishTestResults@2
+            displayName: Publier les résultats des tests
+            condition: succeededOrFailed()
+            inputs:
+              testResultsFormat: JUnit
+              testResultsFiles: pytest-results.xml
+              searchFolder: $(Common.TestResultsDirectory)
+              mergeTestResults: true
+              failTaskOnFailedTests: true
+              testRunTitle: Tests unitaires Python
+
+  - stage: Lint
+    displayName: Lint
+    dependsOn: Test
+    jobs:
+      - job: Ruff
+        displayName: Analyse statique avec Ruff
+        steps:
+          - task: UsePythonVersion@0
+            inputs:
+              versionSpec: '$(pythonVersion)'
+            displayName: Utiliser Python $(pythonVersion)
+
+          - script: |
+              python -m pip install ruff
+              python -m ruff check src/agent.py src/app.py src/rag.py tests --select E4,E7,E9,F
+            displayName: Installer et lancer Ruff
